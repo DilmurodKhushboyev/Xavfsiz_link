@@ -1,0 +1,517 @@
+import { useState, useEffect, useRef } from "react";
+
+const SUSPICIOUS_PATTERNS = [
+  { pattern: /^(?!https?:\/\/)/i, label: "HTTPS yo'q", severity: "high" },
+  { pattern: /bit\.ly|tinyurl|t\.co|goo\.gl|ow\.ly|short\.gy|rb\.gy|cutt\.ly/i, label: "URL qisqartiruvchi", severity: "medium" },
+  { pattern: /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/, label: "IP manzil", severity: "high" },
+  { pattern: /paypal|bank|secure|login|verify|account|update|confirm/i, label: "Phishing so'zlar", severity: "high" },
+  { pattern: /[^\x00-\x7F]/, label: "Unicode aldov belgilar", severity: "high" },
+  { pattern: /\.ru$|\.cn$|\.tk$|\.ml$|\.ga$|\.cf$/i, label: "Xavfli domen zonasi", severity: "medium" },
+  { pattern: /@/, label: "@ belgisi (yo'naltirish)", severity: "high" },
+  { pattern: /javascript:/i, label: "JavaScript injection", severity: "critical" },
+  { pattern: /data:/i, label: "Data URI", severity: "critical" },
+  { pattern: /\.(exe|bat|cmd|scr|vbs|pif|com)(\?|$)/i, label: "Zararli fayl kengaytmasi", severity: "critical" },
+  { pattern: /\-{2,}|\_{2,}/, label: "Ko'p defis/pastki chiziq", severity: "low" },
+  { pattern: /https?:\/\/[^/]*https?:\/\//i, label: "Ichki URL", severity: "critical" },
+  { pattern: /\d{4,}/, label: "Ko'p raqam domenida", severity: "low" },
+];
+
+const SAFE_DOMAINS = [
+  "google.com", "youtube.com", "facebook.com", "instagram.com", "twitter.com",
+  "x.com", "github.com", "wikipedia.org", "microsoft.com", "apple.com",
+  "amazon.com", "linkedin.com", "reddit.com", "stackoverflow.com", "anthropic.com",
+  "claude.ai", "openai.com", "t.me", "telegram.org", "uz"
+];
+
+const SEVERITY_CONFIG = {
+  critical: { color: "#ff2d55", bg: "#1a0008", label: "KRITIK", score: 40 },
+  high:     { color: "#ff6b35", bg: "#1a0800", label: "YUQORI", score: 25 },
+  medium:   { color: "#ffd60a", bg: "#1a1400", label: "O'RTA",  score: 10 },
+  low:      { color: "#4ade80", bg: "#001a08", label: "PAST",   score: 3 },
+};
+
+function analyzeUrl(url) {
+  if (!url || url.trim() === "") return null;
+
+  const trimmed = url.trim();
+  const findings = [];
+  let riskScore = 0;
+
+  // Check HTTPS
+  const hasHttps = /^https:\/\//i.test(trimmed);
+  const hasHttp = /^http:\/\//i.test(trimmed);
+
+  if (!hasHttps && !hasHttp) {
+    findings.push({ label: "Protokol ko'rsatilmagan", severity: "medium" });
+    riskScore += 10;
+  } else if (hasHttp && !hasHttps) {
+    findings.push({ label: "HTTP (shifrsiz aloqa)", severity: "medium" });
+    riskScore += 10;
+  }
+
+  // Extract domain
+  let domain = "";
+  try {
+    const urlObj = new URL(hasHttp || hasHttps ? trimmed : "https://" + trimmed);
+    domain = urlObj.hostname.replace(/^www\./, "");
+  } catch {
+    findings.push({ label: "Noto'g'ri URL format", severity: "high" });
+    riskScore += 25;
+  }
+
+  // Check safe domains
+  const isSafeDomain = SAFE_DOMAINS.some(d => domain === d || domain.endsWith("." + d));
+
+  // Run pattern checks
+  for (const { pattern, label, severity } of SUSPICIOUS_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      findings.push({ label, severity });
+      riskScore += SEVERITY_CONFIG[severity].score;
+    }
+  }
+
+  // Domain length check
+  if (domain.length > 40) {
+    findings.push({ label: "Juda uzun domen", severity: "medium" });
+    riskScore += 10;
+  }
+
+  // Subdomain count
+  const subdomains = domain.split(".").length - 2;
+  if (subdomains > 2) {
+    findings.push({ label: "Ko'p subdomen", severity: "medium" });
+    riskScore += 10;
+  }
+
+  if (isSafeDomain && riskScore < 30) {
+    riskScore = Math.max(0, riskScore - 20);
+  }
+
+  riskScore = Math.min(100, riskScore);
+
+  let verdict, verdictColor, verdictBg, verdictIcon;
+  if (riskScore === 0 && findings.length === 0) {
+    verdict = "XAVFSIZ"; verdictColor = "#00ff88"; verdictBg = "#001a0d"; verdictIcon = "✓";
+  } else if (riskScore < 20) {
+    verdict = "MUMKIN"; verdictColor = "#4ade80"; verdictBg = "#001a08"; verdictIcon = "◎";
+  } else if (riskScore < 45) {
+    verdict = "SHUBHALI"; verdictColor = "#ffd60a"; verdictBg = "#1a1400"; verdictIcon = "⚠";
+  } else if (riskScore < 70) {
+    verdict = "XAVFLI"; verdictColor = "#ff6b35"; verdictBg = "#1a0800"; verdictIcon = "✕";
+  } else {
+    verdict = "BLOKLANGAN"; verdictColor = "#ff2d55"; verdictBg = "#1a0008"; verdictIcon = "✗";
+  }
+
+  return { findings, riskScore, verdict, verdictColor, verdictBg, verdictIcon, domain, hasHttps, isSafeDomain };
+}
+
+export default function UrlChecker() {
+  const [url, setUrl] = useState("");
+  const [result, setResult] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const inputRef = useRef(null);
+  const barRef = useRef(null);
+
+  const handleAnalyze = () => {
+    if (!url.trim()) return;
+    setAnalyzing(true);
+    setTimeout(() => {
+      const res = analyzeUrl(url);
+      setResult(res);
+      if (res) {
+        setHistory(prev => [{ url, ...res, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 10));
+      }
+      setAnalyzing(false);
+    }, 900);
+  };
+
+  const handleKey = (e) => {
+    if (e.key === "Enter") handleAnalyze();
+  };
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#06060f",
+      fontFamily: "'Courier New', monospace",
+      color: "#e0e0e0",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      padding: "40px 20px",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      {/* Grid background */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 0,
+        backgroundImage: `
+          linear-gradient(rgba(0,255,136,0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(0,255,136,0.03) 1px, transparent 1px)
+        `,
+        backgroundSize: "40px 40px",
+        pointerEvents: "none",
+      }} />
+
+      {/* Glow orbs */}
+      <div style={{
+        position: "fixed", top: "-120px", left: "-120px",
+        width: "400px", height: "400px",
+        background: "radial-gradient(circle, rgba(0,255,136,0.06) 0%, transparent 70%)",
+        pointerEvents: "none", zIndex: 0,
+      }} />
+      <div style={{
+        position: "fixed", bottom: "-120px", right: "-120px",
+        width: "400px", height: "400px",
+        background: "radial-gradient(circle, rgba(255,45,85,0.06) 0%, transparent 70%)",
+        pointerEvents: "none", zIndex: 0,
+      }} />
+
+      <div style={{ position: "relative", zIndex: 1, width: "100%", maxWidth: "660px" }}>
+
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: "48px" }}>
+          <div style={{
+            display: "inline-block",
+            border: "1px solid rgba(0,255,136,0.2)",
+            borderRadius: "4px",
+            padding: "4px 14px",
+            fontSize: "10px",
+            letterSpacing: "4px",
+            color: "#00ff88",
+            marginBottom: "20px",
+            background: "rgba(0,255,136,0.05)",
+          }}>
+            XAVFSIZLIK TIZIMI v2.0
+          </div>
+          <h1 style={{
+            fontSize: "clamp(28px, 6vw, 48px)",
+            fontWeight: "900",
+            letterSpacing: "-1px",
+            margin: "0 0 8px",
+            background: "linear-gradient(135deg, #ffffff 0%, #00ff88 100%)",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            lineHeight: 1.1,
+          }}>
+            URL TEKSHIRUV
+          </h1>
+          <p style={{ color: "#666", fontSize: "13px", letterSpacing: "2px", margin: 0 }}>
+            LINK XAVFSIZLIGINI ANIQLASH
+          </p>
+        </div>
+
+        {/* Input area */}
+        <div style={{
+          border: "1px solid rgba(0,255,136,0.15)",
+          borderRadius: "8px",
+          background: "rgba(0,255,136,0.02)",
+          padding: "24px",
+          marginBottom: "24px",
+          backdropFilter: "blur(10px)",
+        }}>
+          <div style={{ fontSize: "10px", letterSpacing: "3px", color: "#00ff88", marginBottom: "12px" }}>
+            [ URL KIRITING ]
+          </div>
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <input
+              ref={inputRef}
+              value={url}
+              onChange={e => { setUrl(e.target.value); setResult(null); }}
+              onKeyDown={handleKey}
+              placeholder="https://example.com/link..."
+              style={{
+                flex: 1,
+                minWidth: "200px",
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: "6px",
+                padding: "14px 16px",
+                color: "#fff",
+                fontSize: "14px",
+                fontFamily: "'Courier New', monospace",
+                outline: "none",
+                transition: "border-color 0.2s",
+              }}
+              onFocus={e => e.target.style.borderColor = "rgba(0,255,136,0.5)"}
+              onBlur={e => e.target.style.borderColor = "rgba(255,255,255,0.1)"}
+            />
+            <button
+              onClick={handleAnalyze}
+              disabled={analyzing || !url.trim()}
+              style={{
+                background: analyzing ? "rgba(0,255,136,0.1)" : "linear-gradient(135deg, #00ff88, #00cc6a)",
+                border: "none",
+                borderRadius: "6px",
+                padding: "14px 28px",
+                color: analyzing ? "#00ff88" : "#000",
+                fontFamily: "'Courier New', monospace",
+                fontWeight: "900",
+                fontSize: "12px",
+                letterSpacing: "2px",
+                cursor: analyzing || !url.trim() ? "not-allowed" : "pointer",
+                opacity: !url.trim() ? 0.4 : 1,
+                transition: "all 0.2s",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {analyzing ? "SKANLANMOQDA..." : "TEKSHIR →"}
+            </button>
+          </div>
+        </div>
+
+        {/* Scanning animation */}
+        {analyzing && (
+          <div style={{
+            textAlign: "center",
+            padding: "32px",
+            border: "1px solid rgba(0,255,136,0.1)",
+            borderRadius: "8px",
+            marginBottom: "24px",
+            background: "rgba(0,255,136,0.02)",
+          }}>
+            <div style={{
+              width: "48px", height: "48px",
+              border: "2px solid rgba(0,255,136,0.1)",
+              borderTop: "2px solid #00ff88",
+              borderRadius: "50%",
+              margin: "0 auto 16px",
+              animation: "spin 0.8s linear infinite",
+            }} />
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            <div style={{ color: "#00ff88", fontSize: "11px", letterSpacing: "3px" }}>
+              SKANLANMOQDA...
+            </div>
+          </div>
+        )}
+
+        {/* Result */}
+        {result && !analyzing && (
+          <div style={{
+            border: `1px solid ${result.verdictColor}30`,
+            borderRadius: "8px",
+            background: result.verdictBg,
+            marginBottom: "24px",
+            overflow: "hidden",
+            animation: "fadeIn 0.4s ease",
+          }}>
+            <style>{`@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }`}</style>
+
+            {/* Verdict header */}
+            <div style={{
+              padding: "20px 24px",
+              borderBottom: `1px solid ${result.verdictColor}20`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "12px",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                <div style={{
+                  width: "52px", height: "52px",
+                  border: `2px solid ${result.verdictColor}`,
+                  borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: "22px",
+                  color: result.verdictColor,
+                  flexShrink: 0,
+                }}>
+                  {result.verdictIcon}
+                </div>
+                <div>
+                  <div style={{ fontSize: "22px", fontWeight: "900", color: result.verdictColor, letterSpacing: "2px" }}>
+                    {result.verdict}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#666", letterSpacing: "1px", marginTop: "2px" }}>
+                    {result.domain || "noma'lum domen"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Risk score */}
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: "36px", fontWeight: "900", color: result.verdictColor, lineHeight: 1 }}>
+                  {result.riskScore}
+                </div>
+                <div style={{ fontSize: "10px", color: "#555", letterSpacing: "2px" }}>XAVF BALI</div>
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div style={{ padding: "16px 24px", borderBottom: `1px solid ${result.verdictColor}10` }}>
+              <div style={{
+                height: "6px",
+                background: "rgba(255,255,255,0.05)",
+                borderRadius: "3px",
+                overflow: "hidden",
+              }}>
+                <div style={{
+                  height: "100%",
+                  width: `${result.riskScore}%`,
+                  background: `linear-gradient(90deg, ${result.verdictColor}88, ${result.verdictColor})`,
+                  borderRadius: "3px",
+                  transition: "width 1s cubic-bezier(0.4,0,0.2,1)",
+                }} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px", fontSize: "9px", color: "#444", letterSpacing: "1px" }}>
+                <span>XAVFSIZ</span>
+                <span>O'RTA</span>
+                <span>XAVFLI</span>
+              </div>
+            </div>
+
+            {/* SSL & domain info */}
+            <div style={{
+              padding: "16px 24px",
+              borderBottom: `1px solid ${result.verdictColor}10`,
+              display: "flex", gap: "12px", flexWrap: "wrap",
+            }}>
+              <InfoBadge label="SSL" value={result.hasHttps ? "✓ FAOL" : "✕ YO'Q"} ok={result.hasHttps} />
+              <InfoBadge label="DOMEN" value={result.isSafeDomain ? "✓ ISHONCHLI" : "? TEKSHIRILMAGAN"} ok={result.isSafeDomain} />
+              <InfoBadge label="MUAMMOLAR" value={`${result.findings.length} ta topildi`} ok={result.findings.length === 0} />
+            </div>
+
+            {/* Findings */}
+            {result.findings.length > 0 ? (
+              <div style={{ padding: "16px 24px" }}>
+                <div style={{ fontSize: "10px", letterSpacing: "3px", color: "#555", marginBottom: "12px" }}>
+                  [ ANIQLANGAN MUAMMOLAR ]
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {result.findings.map((f, i) => {
+                    const sc = SEVERITY_CONFIG[f.severity];
+                    return (
+                      <div key={i} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        padding: "10px 14px",
+                        background: sc.bg,
+                        border: `1px solid ${sc.color}20`,
+                        borderRadius: "6px",
+                        gap: "8px",
+                      }}>
+                        <div style={{ fontSize: "13px", color: "#ccc" }}>
+                          <span style={{ color: sc.color, marginRight: "8px" }}>▸</span>
+                          {f.label}
+                        </div>
+                        <div style={{
+                          fontSize: "9px", letterSpacing: "2px",
+                          color: sc.color,
+                          border: `1px solid ${sc.color}40`,
+                          padding: "2px 8px",
+                          borderRadius: "3px",
+                          flexShrink: 0,
+                        }}>
+                          {sc.label}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: "20px 24px", textAlign: "center" }}>
+                <div style={{ fontSize: "12px", color: "#00ff88", letterSpacing: "2px" }}>
+                  ✓ HECH QANDAY MUAMMO ANIQLANMADI
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* History */}
+        {history.length > 0 && (
+          <div style={{
+            border: "1px solid rgba(255,255,255,0.06)",
+            borderRadius: "8px",
+            overflow: "hidden",
+            background: "rgba(255,255,255,0.01)",
+          }}>
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              style={{
+                width: "100%",
+                background: "none",
+                border: "none",
+                padding: "16px 24px",
+                color: "#555",
+                fontFamily: "'Courier New', monospace",
+                fontSize: "10px",
+                letterSpacing: "3px",
+                cursor: "pointer",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span>[ SO'NGGI TEKSHIRUVLAR ]</span>
+              <span>{showHistory ? "▲" : "▼"} {history.length} ta</span>
+            </button>
+            {showHistory && (
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                {history.map((h, i) => (
+                  <div
+                    key={i}
+                    onClick={() => { setUrl(h.url); setResult(h); }}
+                    style={{
+                      padding: "12px 24px",
+                      borderBottom: "1px solid rgba(255,255,255,0.04)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "12px",
+                      cursor: "pointer",
+                      transition: "background 0.15s",
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.03)"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                  >
+                    <span style={{ color: h.verdictColor, fontSize: "14px", flexShrink: 0 }}>{h.verdictIcon}</span>
+                    <span style={{ flex: 1, fontSize: "12px", color: "#888", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {h.url}
+                    </span>
+                    <span style={{
+                      fontSize: "9px", letterSpacing: "1px",
+                      color: h.verdictColor,
+                      border: `1px solid ${h.verdictColor}40`,
+                      padding: "2px 8px",
+                      borderRadius: "3px",
+                      flexShrink: 0,
+                    }}>
+                      {h.riskScore}
+                    </span>
+                    <span style={{ fontSize: "10px", color: "#444", flexShrink: 0 }}>{h.time}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div style={{ textAlign: "center", marginTop: "40px", fontSize: "10px", color: "#333", letterSpacing: "2px" }}>
+          URL XAVFSIZLIK SKANERI · LOCAL TAHLIL · SHAXSIY MA'LUMOT SAQLANMAYDI
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoBadge({ label, value, ok }) {
+  return (
+    <div style={{
+      padding: "8px 14px",
+      background: ok ? "rgba(0,255,136,0.05)" : "rgba(255,107,53,0.05)",
+      border: `1px solid ${ok ? "rgba(0,255,136,0.15)" : "rgba(255,107,53,0.15)"}`,
+      borderRadius: "6px",
+    }}>
+      <div style={{ fontSize: "9px", letterSpacing: "2px", color: "#555", marginBottom: "3px" }}>{label}</div>
+      <div style={{ fontSize: "12px", color: ok ? "#00ff88" : "#ff6b35", fontWeight: "700" }}>{value}</div>
+    </div>
+  );
+}
